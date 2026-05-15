@@ -28,67 +28,48 @@ A bare-metal SPI driver for the **Analog Devices AD7124-8** 24-bit sigma-delta A
  
 ---
  
-## Project Structure
- 
-```
-.
-├── main.c                        # Application code (all tasks)
-├── images/
-│   ├── schematic_adc.png         # AD7124 mockup schematic
-│   ├── schematic_connectors.png  # Connector / socket schematic
-│   ├── pin_configuration.png     # Debugger — pin config view
-│   ├── config0_configuration.png # Debugger — CONFIG0 register
-│   ├── filter0_configuration.png # Debugger — FILTER0 register
-│   ├── continuous_mode.png       # Debugger — ADC_CONTROL continuous mode
-│   ├── read_data.png             # Debugger — DATA register read
-│   ├── read_status_1.png         # Debugger — STATUS register (1)
-│   ├── read_status_2.png         # Debugger — STATUS register (2)
-│   ├── read_error.png            # Debugger — ERROR register
-│   ├── reading_channel_config.png# Debugger — CHANNEL register
-│   ├── logic_soft_reset.png      # Logic analyser — soft reset (8×0xFF)
-│   ├── logic_write_control.png   # Logic analyser — ADC_CONTROL write
-│   ├── logic_channel_config.png  # Logic analyser — channel setup
-│   └── logic_read_data.png       # Logic analyser — data read
-└── README.md
-```
- 
----
- 
 ## Implementation
  
-### Task 1 — SPI Hardware Init
+### Task 1 — SPI Hardware Init & First Byte
  
-Configured USART0 as a synchronous SPI master (Mode 3: CPOL=1, CPHA=1) with GPIO routing for MOSI, MISO, SCK, and a software-controlled CS on PA4.
+Configured USART0 as a synchronous SPI master (Mode 3: CPOL=1, CPHA=1) with GPIO routing for MOSI, MISO, SCK, and a software-controlled CS on PA4. Sent the first test byte `0xAA` to verify the bus.
  
 ```c
 void initUSART0(void) {
     CMU_ClockEnable(cmuClock_USART0, true);
     USART_InitSync_TypeDef init = USART_INITSYNC_DEFAULT;
-    init.msbf = true;
-    init.clockMode = usartClockMode3;
-    // GPIO routing for MOSI/MISO/SCK...
+    init.msbf      = true;
+    init.clockMode = usartClockMode3; // CPOL=1, CPHA=1
     USART_InitSync(USART0, &init);
 }
 ```
  
-### Task 2 — Register Read
+![Task 1 - First Byte](images/Task1_sending1_testbyte.png)
  
-Single-byte read using the AD7124 command byte format: `0x40 | address`.
+---
+ 
+### Task 2 — Register Read (ID Register)
+ 
+Single-byte read using the AD7124 command byte format: `0x40 | address`. Read the ID register to verify SPI communication.
  
 ```c
 uint8_t ad7124_read_register(uint8_t address) {
-    uint8_t command_byte = 0x40 | (address & 0x3F);
+    uint8_t command = 0x40 | (address & 0x3F);
     GPIO_PinOutClear(SPI_CS_PORT, SPI_CS_PIN);
-    USART_SpiTransfer(USART0, command_byte);
+    USART_SpiTransfer(USART0, command);
     uint8_t result = USART_SpiTransfer(USART0, 0x00);
     GPIO_PinOutSet(SPI_CS_PORT, SPI_CS_PIN);
     return result;
 }
 ```
  
+![Task 2 - Read ID Register](images/Task2_readingtheregisterId.png)
+ 
+---
+ 
 ### Task 3 — Soft Reset
  
-Sends 64 consecutive `0xFF` bytes (8 SPI transfers) to trigger the AD7124 hardware reset sequence.
+Sends 8 consecutive `0xFF` bytes to trigger the AD7124 hardware reset sequence.
  
 ```c
 void ad7124_soft_reset(void) {
@@ -99,65 +80,64 @@ void ad7124_soft_reset(void) {
 }
 ```
  
-### Task 4 — Generic Read/Write (N-byte)
- 
-Abstracted multi-byte read and write functions used for all subsequent register accesses.
- 
-```c
-void ad7124_write_bytes(uint8_t address, const uint8_t *data, uint8_t length);
-void ad7124_read_bytes(uint8_t address, uint8_t *data, uint8_t length);
-```
- 
-### Task 5 — Register Configuration
- 
-Configured ADC_CONTROL, ERROR_ENABLE, CHANNEL0, CONFIG0, and FILTER0 registers:
- 
-- **ADC_CONTROL**: Standby mode, internal reference enabled
-- **CONFIG0**: REFIN1 reference, bipolar mode, all input buffers enabled, gain = 1
-- **FILTER0**: Sinc3 filter, output data rate ~5 SPS (FS calculated from 153.6 kHz mid-power clock)
-- **CHANNEL0**: AIN0+, AIN1−, linked to CONFIG0
-### Task 6 — Continuous Conversion Loop
- 
-Switched ADC to continuous conversion mode, then polled STATUS, ERROR, and DATA registers in a loop. Raw 24-bit values converted to millivolts:
- 
-```c
-float convertToMillivolts(uint32_t raw, bool bipolar, int gain) {
-    float offset     = bipolar ? 8388608.0f : 0.0f;   // 2^23
-    float resolution = bipolar ? 8388608.0f : 16777216.0f;
-    float vref_mV    = 2500.0f;
-    return ((float)raw - offset) * (vref_mV / resolution / gain);
-}
-```
+![Task 3 - Reset](images/TASK3__reset.png)
+![SPI Reset](images/spi_reset.png)
  
 ---
  
-## Logic Analyser Captures
+### Task 4 — Status Register Read
  
-SPI bus captured with Saleae Logic 2 (D0=CS, D1=MOSI, D2=MISO, D3=SCK).
+Read the STATUS register to check the RDY bit and active channel ID.
  
-### Soft Reset — 8 × 0xFF
+![Task 4 - Status](images/Task4_status.png)
+![Read Status 1](images/Read_status(1).png)
+![Read Status 2](images/read_status(2).png)
  
-![Soft Reset](images/logic_soft_reset.png)
+---
  
-CS pulled low; eight `0xFF` bytes sent on MOSI. MISO returns `0xFF` (no data driven by ADC during reset). Clock frequency ~103 kHz.
+### Task 5 — ADC Control & Full Register Configuration
  
-### ADC_CONTROL Write — Standby Mode
+Configured ADC_CONTROL, ERROR_ENABLE, CHANNEL0, CONFIG0, and FILTER0:
  
-![Control Write](images/logic_write_control.png)
+- **ADC_CONTROL:** Standby mode, internal reference enabled
+- **CONFIG0:** REFIN1, bipolar mode, all buffers on, gain = 1
+- **FILTER0:** Sinc3, ~5 SPS output rate
+- **CHANNEL0:** AIN0+, AIN1−, linked to CONFIG0
+```c
+uint16_t ad7124_calc_fs(float desired_sps, ad7124_power_mode_t pwr) {
+    float fclk_hz = 153600.0f; // mid-power clock
+    float fs_f = fclk_hz / (32.0f * desired_sps);
+    return (uint16_t)(fs_f + 0.5f);
+}
+```
  
-Command byte `0x01` (write ADC_CONTROL), followed by `0x00`, `0xC0` (standby + REFEN bits set).
+![Task 5 - ADC Control](images/TAsk5_ADCcontrol.png)
+![SPI Standby](images/SPI_standby.png)
+![SPI Disable Channel 0](images/SPI_Disable_channel_0.png)
+![SPI Disable Channel 1](images/SPI_disable_channel_1.png)
+![SPI Channel Configuration](images/SPI_channel_configuration.png)
+![SPI Error Enable](images/SPI_error_enable.png)
  
-### Channel Configuration Write
+---
  
-![Channel Config](images/logic_channel_config.png)
+### Task 6 — Continuous Conversion Loop
  
-Four-byte transaction: command byte `0x21` (write FILTER0), then three configuration bytes setting the FS rate for ~5 SPS.
+Switched ADC to continuous conversion mode. Polled STATUS, ERROR, and DATA registers. Raw 24-bit values converted to millivolts:
  
-### DATA Register Read
+```c
+float convertToMillivolts(uint32_t raw, bool bipolar, int gain) {
+    float offset     = bipolar ? 8388608.0f : 0.0f;
+    float resolution = bipolar ? 8388608.0f : 16777216.0f;
+    float vref_mV    = 2500.0f;
+    return ((float)raw - offset) * (vref_mV / resolution / (float)gain);
+}
+```
  
-![Data Read](images/logic_read_data.png)
- 
-Command byte `0x42` (read DATA register). ADC returns three bytes on MISO (`0xAB`, `0x78`, `0xA3`) — a live 24-bit conversion result.
+![Continuous Mode](images/continuous_mode.png)
+![Read Data](images/Read_Data.png)
+![Read Error](images/read_error.png)
+![Reading Channel Config](images/reading_channel_config.png)
+![Voltage Variable](images/Voltage_variable.png)
  
 ---
  
@@ -165,30 +145,12 @@ Command byte `0x42` (read DATA register). ADC returns three bytes on MISO (`0xAB
  
 All register values verified live in Simplicity Studio via SEGGER J-Link.
  
-| View | Description |
+| Register | Screenshot |
 |---|---|
-| ![Pin Config](images/pin_configuration.png) | SPI pin routing confirmed |
-| ![Config0](images/config0_configuration.png) | CONFIG0: bipolar, REFIN1, buffers on, gain=1 |
-| ![Filter0](images/filter0_configuration.png) | FILTER0: FS register value for ~5 SPS |
-| ![Continuous](images/continuous_mode.png) | ADC_CONTROL: continuous conversion mode active |
-| ![Status 1](images/read_status_1.png) | STATUS register — channel ID, RDY bit |
-| ![Status 2](images/read_status_2.png) | STATUS register — second read |
-| ![Error](images/read_error.png) | ERROR register — no active errors |
-| ![Data](images/read_data.png) | DATA register — 24-bit conversion result |
-| ![Channel](images/reading_channel_config.png) | CHANNEL0 register — AIN0/AIN1 mapping |
+| Pin Configuration | ![](images/Pin_Configuration.png) |
+| CONFIG0 | ![](images/Config0_configuration.png) |
+| FILTER0 | ![](images/Filter0_configuration.png) |
  
----
- 
-## Schematic
- 
-The hardware target is the INNIRION AD7124 mockup board (1118_Mockup_AD7124, rev V1I1).
- 
-Key design features:
-- ADP7118 LDO generates a clean 3.00 V AVDD for the analog supply
-- ADR3625 provides a precision 2.500 V reference (REFIN1+/REFIN1−)
-- Anti-aliasing RC filters (40.2 kΩ + 100 nF, fc ≈ 39.6 Hz) on analog inputs
-- Internal 32 Hz sine reference signal for calibration channel
-- SPI routed through a 20-pin socket (JS1) to the EFM32 host board
 ---
  
 ## Tools & Environment
